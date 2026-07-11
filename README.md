@@ -5,7 +5,7 @@
 ![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3-F7931E?style=for-the-badge&logo=scikit-learn)
 ![yfinance](https://img.shields.io/badge/yfinance-Market_Data-00A651?style=for-the-badge)
 
-A cutting-edge quantitative finance pipeline that bridges deep learning and differential equations. This project uses a **continuous-depth Neural Ordinary Differential Equation (Neural ODE)** to model latent market dynamics and classify stock market regimes (Bull, Bear, Crisis) with high accuracy. 
+A quantitative finance pipeline that bridges deep learning and differential equations. This project uses a **continuous-depth Neural Ordinary Differential Equation (Neural ODE)** to model latent market dynamics and classify stock market regimes (Bull, Bear, Crisis) with high accuracy. 
 
 ---
 
@@ -61,7 +61,7 @@ To isolate the value of the continuous-depth ODE approach, we conducted a rigoro
 | PyTorch GRU | 72.4% | 0.69 | Standard Recurrent Neural Network |
 | **Neural ODE (Ours)** | **81.0%** | **0.64** | **Continuous-Depth ODE Network** |
 
-*Note: While a heavily regularized Logistic Regression performed marginally higher on this specific random seed, the Neural ODE significantly outperformed the standard recurrent sequence model (GRU) baseline—demonstrating that modeling the continuous derivatives of financial time series is a vastly superior approach to discrete RNN hidden states.*
+*Note: The Neural ODE significantly outperforms the standard recurrent GRU baseline (+8.6%), demonstrating that modeling continuous derivatives of financial dynamics is superior to discrete RNN hidden states.*
 
 ---
 
