@@ -5,17 +5,18 @@
 ![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3-F7931E?style=for-the-badge&logo=scikit-learn)
 ![yfinance](https://img.shields.io/badge/yfinance-Market_Data-00A651?style=for-the-badge)
 
-A cutting-edge quantitative finance pipeline that bridges deep learning and differential equations. This project replaces traditional Hidden Markov Models (HMMs) with a **continuous-depth Neural Ordinary Differential Equation (Neural ODE)** to model latent market dynamics and classify stock market regimes (Bull, Bear, Crisis) with high accuracy.
+A cutting-edge quantitative finance pipeline that bridges deep learning and differential equations. This project uses a **continuous-depth Neural Ordinary Differential Equation (Neural ODE)** to model latent market dynamics and classify stock market regimes (Bull, Bear, Crisis) with high accuracy. 
 
 ---
 
 ## 🚀 Key Achievements
 
-*   **Architecture:** Built a custom Neural ODE architecture using `torchdiffeq` to model continuous time-series dynamics.
-*   **Performance:** Outperformed a standard Gaussian HMM baseline by **31.6%** in walk-forward classification accuracy.
-*   **Metrics:** Reached **81.03%** accuracy on the test set, compared to the baseline's **49.43%**.
-*   **Data Scale:** Trained on 5 years of daily data (~1,230 trading days) across 5 major blue-chip NSE stocks (RELIANCE, TCS, INFY, HDFCBANK) and the NIFTY50 index.
-*   **Validation Methodology:** Strict chronological 70/15/15 walk-forward split to ensure **zero lookahead bias**.
+*   **Architecture:** Built a custom Neural ODE architecture using `torchdiffeq` to model continuous time-series dynamics via adjoint sensitivity backpropagation.
+*   **Performance:** Achieved **81.0% supervised regime classification accuracy** on unseen walk-forward data.
+*   **Validation Methodology:** Strict chronological 70/15/15 walk-forward split to ensure **zero lookahead bias**. 
+*   **Data Scale:** Trained on 5 years of daily data (~1,230 trading days) across 5 major blue-chip NSE stocks (RELIANCE, TCS, INFY, HDFCBANK) and the NIFTY50 index using 30-day sliding windows.
+*   **Robustness:** Engineered 5 financial features (RSI, MACD, log returns, volatility, MA ratio) and applied weighted CrossEntropyLoss to combat class imbalance, enabling reliable detection of rare crisis regimes.
+*   **Baseline Reference:** Included a Gaussian HMM as an unsupervised reference point (achieving ~49% accuracy), highlighting the sheer predictive power of the supervised ODE approach.
 
 ---
 
@@ -44,7 +45,7 @@ The pipeline is fully automated and runs sequentially via `main.py`:
     *   Auto-labels ground truth regimes based on 20-day forward returns and volatility spikes.
     *   Handles class imbalance using weighted Cross-Entropy Loss.
     *   Trains the Neural ODE (GRU encoder → ODE solver (`dopri5`) → Linear decoder) for 100 epochs.
-4.  **`evaluate.py` (Benchmarking):** Compares the Neural ODE's predictions against a `GaussianHMM` (from `hmmlearn`) on the hold-out test set, generating precision/recall/f1 metrics.
+4.  **`evaluate.py` (Benchmarking):** Evaluates the Neural ODE's predictions and compares against an unsupervised `GaussianHMM` reference on the hold-out test set.
 5.  **`plot.py` (Visualization):** Renders the detected regime bands over the historical price chart using `matplotlib`.
 
 ---
@@ -66,17 +67,4 @@ The pipeline is fully automated and runs sequentially via `main.py`:
    ```bash
    python main.py
    ```
-   *This single command will download data, engineer features, train the ODE solver, run the HMM baseline, and generate the final plot and accuracy report.*
-
----
-
-## 📈 Detailed Results
-
-**Test Set Summary (Walk-Forward):**
-| Model | Accuracy |
-| :--- | :---: |
-| **Neural ODE (Ours)** | **81.03%** |
-| Gaussian HMM (Baseline) | 49.43% |
-| **Improvement** | **+31.60%** |
-
-*The full detailed classification report is generated in `accuracy_report.txt` upon running the pipeline.*
+   *This single command will download data, engineer features, train the ODE solver, run the evaluation, and generate the final plot and accuracy report.*
