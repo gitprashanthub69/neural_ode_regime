@@ -7,11 +7,16 @@ Saves results to accuracy_report.txt.
 
 import os
 import numpy as np
+import pandas as pd
 import torch
-from sklearn.metrics import classification_report, accuracy_score
+import torch.nn as nn
+from sklearn.metrics import classification_report, accuracy_score, f1_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from hmmlearn.hmm import GaussianHMM
 
-from model import NeuralODERegimeDetector
+from model import NeuralODERegimeDetector, LATENT_DIM
+from train import compute_regime_labels, create_sliding_windows, walk_forward_split
 
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -26,12 +31,10 @@ def evaluate_neural_ode(X_test, y_test):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model not found at {model_path}. Run train.py first.")
 
-    # Load checkpoint
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
     input_dim = checkpoint["input_dim"]
     latent_dim = checkpoint["latent_dim"]
 
-    # Initialize model
     model = NeuralODERegimeDetector(input_dim=input_dim, latent_dim=latent_dim)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -39,11 +42,9 @@ def evaluate_neural_ode(X_test, y_test):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    # Predict on test set
     X_tensor = torch.FloatTensor(X_test).to(device)
     all_preds = []
 
-    # Process in batches to avoid OOM
     batch_size = 64
     with torch.no_grad():
         for i in range(0, len(X_tensor), batch_size):
@@ -71,17 +72,13 @@ def evaluate_neural_ode(X_test, y_test):
 def evaluate_hmm_baseline(X_test, y_test):
     """
     Train and evaluate GaussianHMM baseline.
-    We use the test windows' features (flattened to 2D) to fit an HMM,
-    then map HMM states to ground-truth labels using majority voting.
     """
     print("\n" + "=" * 60)
     print("HMM BASELINE — TEST SET RESULTS")
     print("=" * 60)
 
-    # For HMM: use the last time step features from each window
-    X_hmm = X_test[:, -1, :]  # (n_samples, n_features)
+    X_hmm = X_test[:, -1, :]
 
-    # Fit GaussianHMM
     n_components = 3
     hmm = GaussianHMM(
         n_components=n_components,
@@ -95,22 +92,17 @@ def evaluate_hmm_baseline(X_test, y_test):
         hmm_states = hmm.predict(X_hmm)
     except Exception as e:
         print(f"  HMM fitting failed: {e}")
-        print("  Using random baseline instead.")
         hmm_states = np.random.randint(0, 3, size=len(y_test))
 
-    # Map HMM states to true labels via majority voting
     state_map = {}
     for state in range(n_components):
         mask = hmm_states == state
         if mask.sum() > 0:
-            # Most common true label for this HMM state
             true_labels = y_test[mask]
             state_map[state] = np.bincount(true_labels.astype(int), minlength=3).argmax()
         else:
             state_map[state] = 0
 
-    # Resolve conflicts: if multiple HMM states map to same label,
-    # assign based on highest count
     used_labels = set()
     sorted_states = sorted(
         state_map.keys(),
@@ -124,7 +116,6 @@ def evaluate_hmm_baseline(X_test, y_test):
             final_map[state] = preferred
             used_labels.add(preferred)
         else:
-            # Assign next available label
             for label in range(3):
                 if label not in used_labels:
                     final_map[state] = label
@@ -146,9 +137,97 @@ def evaluate_hmm_baseline(X_test, y_test):
     return hmm_preds, hmm_accuracy
 
 
+class GRUModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_classes=3):
+        super().__init__()
+        self.gru = nn.GRU(input_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, num_classes)
+        
+    def forward(self, x):
+        _, h_n = self.gru(x)
+        return self.fc(h_n.squeeze(0))
+
+
+def run_ablation_study(ode_acc, ode_preds):
+    """Train baseline models and print ablation study."""
+    features_path = os.path.join(DATA_DIR, "features.csv")
+    raw_path = os.path.join(DATA_DIR, "raw.csv")
+    
+    features_df = pd.read_csv(features_path, index_col="Date", parse_dates=True)
+    feature_values = features_df.values
+    labels = compute_regime_labels(raw_path, features_df)
+    
+    X, y = create_sliding_windows(feature_values, labels)
+    X_train, y_train, X_val, y_val, X_test, y_test = walk_forward_split(X, y)
+    
+    X_train_flat = X_train.reshape(X_train.shape[0], -1)
+    X_test_flat = X_test.reshape(X_test.shape[0], -1)
+    
+    results = {}
+    
+    print("\nRunning Ablation Study on exact walk-forward split...")
+    
+    # 1. Logistic Regression
+    lr = LogisticRegression(max_iter=2000, class_weight='balanced', random_state=42)
+    lr.fit(X_train_flat, y_train)
+    lr_preds = lr.predict(X_test_flat)
+    results["Logistic Regression"] = (accuracy_score(y_test, lr_preds)*100, f1_score(y_test, lr_preds, average='macro', zero_division=0))
+    
+    # 2. Random Forest
+    rf = RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42)
+    rf.fit(X_train_flat, y_train)
+    rf_preds = rf.predict(X_test_flat)
+    results["Random Forest"] = (accuracy_score(y_test, rf_preds)*100, f1_score(y_test, rf_preds, average='macro', zero_division=0))
+    
+    # 3. GRU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_dim = X_train.shape[2]
+    gru = GRUModel(input_dim, LATENT_DIM).to(device)
+    
+    train_counts = np.bincount(y_train.astype(int), minlength=3).astype(float)
+    train_counts = np.maximum(train_counts, 1.0)
+    class_weights = 1.0 / train_counts
+    class_weights = class_weights / class_weights.sum() * 3
+    criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights).to(device))
+    optimizer = torch.optim.Adam(gru.parameters(), lr=1e-3)
+    
+    X_train_t = torch.FloatTensor(X_train).to(device)
+    y_train_t = torch.LongTensor(y_train).to(device)
+    
+    gru.train()
+    for _ in range(100):
+        optimizer.zero_grad()
+        logits = gru(X_train_t)
+        loss = criterion(logits, y_train_t)
+        loss.backward()
+        optimizer.step()
+        
+    gru.eval()
+    with torch.no_grad():
+        gru_preds = gru(torch.FloatTensor(X_test).to(device)).argmax(dim=1).cpu().numpy()
+    results["GRU"] = (accuracy_score(y_test, gru_preds)*100, f1_score(y_test, gru_preds, average='macro', zero_division=0))
+    
+    # 4. Neural ODE (Using precomputed predictions)
+    ode_f1 = f1_score(y_test, ode_preds, average='macro', zero_division=0)
+    results["Neural ODE"] = (ode_acc, ode_f1)
+    
+    # Generate Table
+    table = f"{'Model':<20} {'Accuracy':<10} {'Macro F1':<8}\n"
+    table += "-" * 40 + "\n"
+    for model in ["Logistic Regression", "Random Forest", "GRU", "Neural ODE"]:
+        acc, f1 = results[model]
+        table += f"{model:<20} {acc:>5.1f}%     {f1:>4.2f}\n"
+        
+    print("\n" + "=" * 40)
+    print("ABLATION STUDY RESULTS")
+    print("=" * 40)
+    print(table)
+    
+    return table
+
+
 def run_evaluation():
     """Run full evaluation and save results."""
-    # Load test data
     test_path = os.path.join(DATA_DIR, "test_data.npz")
     if not os.path.exists(test_path):
         raise FileNotFoundError(f"Test data not found at {test_path}. Run train.py first.")
@@ -159,13 +238,9 @@ def run_evaluation():
 
     print(f"Test set: {len(X_test)} samples")
 
-    # Evaluate Neural ODE
     ode_preds, ode_acc = evaluate_neural_ode(X_test, y_test)
-
-    # Evaluate HMM baseline
     hmm_preds, hmm_acc = evaluate_hmm_baseline(X_test, y_test)
 
-    # Summary
     improvement = ode_acc - hmm_acc
 
     print("\n" + "=" * 60)
@@ -175,8 +250,10 @@ def run_evaluation():
     print(f"  HMM Baseline Accuracy: {hmm_acc:.2f}%")
     print(f"  Improvement:           {improvement:+.2f}%")
     print("=" * 60)
+    
+    # Run ablation study
+    ablation_table = run_ablation_study(ode_acc, ode_preds)
 
-    # Save results
     report_path = os.path.join(MODEL_DIR, "accuracy_report.txt")
     with open(report_path, "w") as f:
         f.write("=" * 60 + "\n")
@@ -194,7 +271,7 @@ def run_evaluation():
         )
         f.write("\n")
 
-        f.write("--- HMM Baseline Results ---\n")
+        f.write("--- HMM Baseline Results (Unsupervised) ---\n")
         f.write(f"Accuracy: {hmm_acc:.2f}%\n")
         f.write(
             classification_report(
@@ -207,6 +284,11 @@ def run_evaluation():
         f.write(f"Neural ODE Accuracy:   {ode_acc:.2f}%\n")
         f.write(f"HMM Baseline Accuracy: {hmm_acc:.2f}%\n")
         f.write(f"Improvement:           {improvement:+.2f}%\n")
+        
+        f.write("\n\n" + "=" * 40 + "\n")
+        f.write("ABLATION STUDY RESULTS\n")
+        f.write("=" * 40 + "\n")
+        f.write(ablation_table)
 
     print(f"\n* Accuracy report saved to {report_path}")
 
